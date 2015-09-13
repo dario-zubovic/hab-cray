@@ -77,9 +77,9 @@ void dmpDataReady() {
 }
 
 /////////////////////////////////INTERRUPTS
-volatile unsigned int GM1_count = 0;
-volatile unsigned int GM2_count = 0;
-volatile unsigned int GM_AND_count = 0;
+volatile unsigned long GM1_count = 0L;
+volatile unsigned long GM2_count = 0L;
+volatile unsigned long GM_AND_count = 0L;
 
 void GM1_interrupt() {
   GM1_count++;
@@ -215,10 +215,10 @@ void loop() {
     }
     
     while (!useMPU || (!mpuInterrupt && fifoCount < packetSize)) {
-      if(millis() - last_datalog_write_millis > 200) {
+      if(millis() - last_datalog_write_millis > 1000) {
         File dataFile = SD.open("l.txt", FILE_WRITE);
         
-        if (dataFile) {
+        if(dataFile) {
           //time
           dataFile.print(millis());
           dataFile.print(" ");
@@ -251,12 +251,14 @@ void loop() {
           dataFile.print(" ");
           dataFile.print(gps_time_age); //time age
           
-          //gyroscope data
-          dataFile.write(teapotPacket, 12);
-          teapotPacket[11]++; // packetCount, loops at 0xFF on purpose
-          dataFile.print(" ");
-          dataFile.print(last_gyro_millis); //time
-          
+          if(useMPU) {
+            //gyroscope data
+            dataFile.wrte(teapotPacket, 12);
+            teapotPacket[11]++; // packetCount, loops at 0xFF on purpose
+            dataFile.print(" ");
+            dataFile.print(last_gyro_millis); //time
+          }
+
           //done
           dataFile.println();
           dataFile.close();
@@ -271,10 +273,10 @@ void loop() {
     mpuInterrupt = false; //reset interrupt flag and get INT_STATUS byte
     mpuIntStatus = mpu.getIntStatus();
     fifoCount = mpu.getFIFOCount(); //get current FIFO count
-    if ((mpuIntStatus & 0x10) || fifoCount == 1024) { //check for overflow
+    if((mpuIntStatus & 0x10) || fifoCount == 1024) { //check for overflow
       mpu.resetFIFO(); //reset so we can continue cleanly
       //Serial.println(F("FIFO overflow!"));
-    } else if (mpuIntStatus & 0x02) {
+    } else if(mpuIntStatus & 0x02) {
       while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
       mpu.getFIFOBytes(fifoBuffer, packetSize);
       fifoCount -= packetSize;
