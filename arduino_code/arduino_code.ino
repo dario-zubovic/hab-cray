@@ -24,6 +24,7 @@
 #include <I2Cdev.h>
 #include <MPU6050_6Axis_MotionApps20.h>
 #include <Wire.h>
+#include <avr/wdt.h>
 
 /*
 Libraries:
@@ -99,6 +100,8 @@ unsigned long last_gyro_millis = 0;
 void setup() {
   pinMode(LED, OUTPUT);
   digitalWrite(LED, HIGH);
+
+  wdt_enable(WDTO_4S); // start watchdog timer of 4 seconds
   
   Serial.begin(9600);
   //Serial.println(F("Starting setup..."));
@@ -203,6 +206,8 @@ void setup() {
 
 /////////////////////////////////LOOP
 void loop() {
+    wdt_reset(); // Bee Gees - Stayin' Alive
+
     while (GPSserial.available() > 0) {
       if(gps.encode(GPSserial.read())) {
         gps.f_get_position(&gps_lat, &gps_lon, &gps_position_age);
@@ -263,7 +268,7 @@ void loop() {
           dataFile.println();
           dataFile.close();
         } else {
-          //Serial.println(F("Can't open the file"));
+          Serial.println(F("Can't open the file"));
         }
         
         last_datalog_write_millis = millis();
