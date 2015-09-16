@@ -43,7 +43,6 @@ const byte LED = 5;
 //const byte GPS_TX = 3;
 //const byte GYRO_SCL_ANALOG = 5;  //i2c
 //const byte GYRO_SDA_ANALOG = 4;  //i2c
-//const byte GYRO_INTERRUPT = 4;
 //const byte SD_CS = 10;
 //const byte SD_SCK = 13;  //SPI
 //const byte SD_MOSI = 11;  //SPI
@@ -61,21 +60,8 @@ byte gps_month, gps_day, gps_hour, gps_minute, gps_second, gps_hundredths;
 MPU6050 mpu(0x68);
 boolean useMPU = false;
 
-//MPU control/status vars
-uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
-uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
-uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
-uint16_t fifoCount;     // count of all bytes currently in FIFO
-uint8_t fifoBuffer[64]; // FIFO storage buffer
-
-//orientation/motion vars
-uint8_t teapotPacket[14] = { '$', 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00};
-
-//MPU interrupt
-volatile boolean mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
-void dmpDataReady() {
-    mpuInterrupt = true;
-}
+int16_t ax, ay, az; // accelerometer axes
+int16_t gx, gy, gz; //gyroscope axes
 
 /////////////////////////////////INTERRUPTS
 volatile unsigned long GM1_count = 0L;
@@ -95,59 +81,30 @@ void GM_AND_interrupt() {
 /////////////////////////////////variables
 unsigned long last_datalog_write_millis = 0;
 unsigned long last_gyro_millis = 0;
+boolean first_write = true;
 
 /////////////////////////////////SETUP
 void setup() {
+  //clear timer right away in order to not get stuck in infinite reset loop
+  wdt_reset();
+  wdt_disable();
+
+  //LED indicator
   pinMode(LED, OUTPUT);
   digitalWrite(LED, HIGH);
 
-  wdt_enable(WDTO_4S); // start watchdog timer of 4 seconds
-  
+  //init serial
   Serial.begin(9600);
-  //Serial.println(F("Starting setup..."));
-  
-  //interrupt setup
-  pinMode(8, INPUT);
-  attachPinChangeInterrupt(8, GM1_interrupt, RISING);
-  pinMode(7, INPUT);
-  attachPinChangeInterrupt(7, GM2_interrupt, RISING);
-  pinMode(6, INPUT);
-  attachPinChangeInterrupt(6, GM_AND_interrupt, RISING);
+
+  Serial.println(F("I0")); // I0 = Starting setup...
   
   //SD setup
   if(!SD.begin(10)) {
-    Serial.println(F("Card failed or not present!"));
-    digitalWrite(LED, LOW);
-    delay(2000);
-    digitalWrite(LED, HIGH);
-    delay(2000);
-    digitalWrite(LED, LOW);
-    delay(2000);
-    digitalWrite(LED, HIGH);
-    delay(2000);
+    Serial.println(F("E0")); //E0 = Card failed or not present!
     digitalWrite(LED, LOW);
     delay(2000);
     digitalWrite(LED, HIGH);
     return;
-  }
-  File dataFile = SD.open("l.txt", FILE_WRITE);
-  if(dataFile) {
-    dataFile.println("#fresh start#");
-    dataFile.close();
-  } else {
-    Serial.println(F("Card reading failed."));
-    digitalWrite(LED, LOW);
-    delay(2000);
-    digitalWrite(LED, HIGH);
-    delay(2000);
-    digitalWrite(LED, LOW);
-    delay(2000);
-    digitalWrite(LED, HIGH);
-    delay(2000);
-    digitalWrite(LED, LOW);
-    delay(2000);
-    digitalWrite(LED, HIGH);
-    return;  
   }
   
   //gps setup
@@ -171,19 +128,10 @@ void setup() {
     digitalWrite(LED, LOW);
     delay(500);
     digitalWrite(LED, HIGH);
-    delay(500);
-    digitalWrite(LED, LOW);
-    delay(500);
-    digitalWrite(LED, HIGH);
-    delay(500);
-    digitalWrite(LED, LOW);
+
+    Serial.println(F("E3")); //E3 = Not using MPU 6050 Gyro/acc
   } else {
     useMPU = true;
-  }
-  
-  if(useMPU) {
-    int devStatus = mpu.dmpInitialize(); //bottleneck
-    useMPU = devStatus==0;
     
     mpu.setXAccelOffset(69.53372273); //TODO beter calibration
     mpu.setYAccelOffset(701.3089899);
@@ -191,16 +139,23 @@ void setup() {
     mpu.setXGyroOffset(350.954957);
     mpu.setYGyroOffset(20.43722386);
     mpu.setZGyroOffset(367.8086022);
+    
+    Serial.println(F("I2")); //I2 = Using MPU 6050 Gyro/acc
   }
   
-  if(useMPU) {
-    mpu.setDMPEnabled(true);
-    pinMode(4, INPUT);
-    attachPinChangeInterrupt(4, dmpDataReady, RISING);
-    mpuIntStatus = mpu.getIntStatus();
-    packetSize = mpu.dmpGetFIFOPacketSize();
-  }
+  //interrupt setup
+  pinMode(8, INPUT);
+  attachPinChangeInterrupt(8, GM1_interrupt, RISING);
+  pinMode(7, INPUT);
+  attachPinChangeInterrupt(7, GM2_interrupt, RISING);
+  pinMode(6, INPUT);
+  attachPinChangeInterrupt(6, GM_AND_interrupt, RISING);
+
+  //start watchdog timer of 4 seconds
+  wdt_enable(WDTO_4S);
   
+  //finish
+  Serial.println(F("I1")); // I1 = Init completed successfully!
   digitalWrite(LED, LOW);
 }
 
@@ -208,6 +163,7 @@ void setup() {
 void loop() {
     wdt_reset(); // Bee Gees - Stayin' Alive
 
+    /////////////// GPS data is available, read it!
     while (GPSserial.available() > 0) {
       if(gps.encode(GPSserial.read())) {
         gps.f_get_position(&gps_lat, &gps_lon, &gps_position_age);
@@ -219,80 +175,78 @@ void loop() {
       }
     }
     
-    while (!useMPU || (!mpuInterrupt && fifoCount < packetSize)) {
-      if(millis() - last_datalog_write_millis > 1000) {
-        File dataFile = SD.open("l.txt", FILE_WRITE);
-        
-        if(dataFile) {
-          //time
-          dataFile.print(millis());
-          dataFile.print(" ");
-          
-          //geiger-muller counter data
-          dataFile.print(GM1_count);
-          GM1_count = 0;
-          dataFile.print(" ");
-          dataFile.print(GM2_count);
-          GM2_count = 0;
-          dataFile.print(" ");
-          dataFile.print(GM_AND_count);
-          GM_AND_count = 0;
-          dataFile.print(" ");
-          
-          //GPS data
-          dataFile.print(gps_lat, 5); //lat
-          dataFile.print(" ");
-          dataFile.print(gps_lon, 5); //lon
-          dataFile.print(" ");
-          dataFile.print(gps_altitude, 2); //alt
-          dataFile.print(" ");
-          dataFile.print(gps_position_age); //position age
-          dataFile.print(" ");
-          dataFile.print(gps.satellites()); //number of satellites visible
-          dataFile.print(" ");
-          dataFile.print(gps.hdop()); //horizontal dilution of precision
-          dataFile.print(" ");
-          dataFile.print(gps_hour*10000 + gps_minute*100 + gps_second + gps_hundredths/1000, 4); //time
-          dataFile.print(" ");
-          dataFile.print(gps_time_age); //time age
-          
-          if(useMPU) {
-            //gyroscope data
-            dataFile.wrte(teapotPacket, 12);
-            teapotPacket[11]++; // packetCount, loops at 0xFF on purpose
-            dataFile.print(" ");
-            dataFile.print(last_gyro_millis); //time
-          }
+    wdt_reset(); // reset watchdog timer
 
-          //done
-          dataFile.println();
-          dataFile.close();
-        } else {
-          Serial.println(F("Can't open the file"));
-        }
-        
-        last_datalog_write_millis = millis();
-      }
-    }
-   
-    mpuInterrupt = false; //reset interrupt flag and get INT_STATUS byte
-    mpuIntStatus = mpu.getIntStatus();
-    fifoCount = mpu.getFIFOCount(); //get current FIFO count
-    if((mpuIntStatus & 0x10) || fifoCount == 1024) { //check for overflow
-      mpu.resetFIFO(); //reset so we can continue cleanly
-      //Serial.println(F("FIFO overflow!"));
-    } else if(mpuIntStatus & 0x02) {
-      while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
-      mpu.getFIFOBytes(fifoBuffer, packetSize);
-      fifoCount -= packetSize;
-      teapotPacket[2] = fifoBuffer[0];
-      teapotPacket[3] = fifoBuffer[1];
-      teapotPacket[4] = fifoBuffer[4];
-      teapotPacket[5] = fifoBuffer[5];
-      teapotPacket[6] = fifoBuffer[8];
-      teapotPacket[7] = fifoBuffer[9];
-      teapotPacket[8] = fifoBuffer[12];
-      teapotPacket[9] = fifoBuffer[13];
+    //////////////// time to write to SD card
+    if(millis() - last_datalog_write_millis > 1000) {
+      mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz); // read MPU6050 raw data
       last_gyro_millis = millis();
+
+      File dataFile = SD.open("l.txt", FILE_WRITE);
+      
+      if(dataFile) {
+        if(first_write) {
+          dataFile.println("#fresh start#");
+          first_write = false;
+        }
+
+        //time
+        dataFile.print(millis());
+        dataFile.print(" ");
+        
+        //geiger-muller counter data
+        dataFile.print(GM1_count);
+        GM1_count = 0;
+        dataFile.print(" ");
+        dataFile.print(GM2_count);
+        GM2_count = 0;
+        dataFile.print(" ");
+        dataFile.print(GM_AND_count);
+        GM_AND_count = 0;
+        dataFile.print(" ");
+        
+        //GPS data
+        dataFile.print(gps_lat, 5); //lat
+        dataFile.print(" ");
+        dataFile.print(gps_lon, 5); //lon
+        dataFile.print(" ");
+        dataFile.print(gps_altitude, 2); //alt
+        dataFile.print(" ");
+        dataFile.print(gps_position_age); //position age
+        dataFile.print(" ");
+        dataFile.print(gps.satellites()); //number of satellites visible
+        dataFile.print(" ");
+        dataFile.print(gps.hdop()); //horizontal dilution of precision
+        dataFile.print(" ");
+        dataFile.print(gps_hour*10000 + gps_minute*100 + gps_second + gps_hundredths/1000, 4); //time
+        dataFile.print(" ");
+        dataFile.print(gps_time_age); //time age
+        
+        if(useMPU) {
+          //gyroscope data
+          dataFile.print(ax); //acc X
+          dataFile.print(" ");
+          dataFile.print(ay); //acc Y
+          dataFile.print(" ");
+          dataFile.print(az); //acc Z
+          dataFile.print(" ");
+          dataFile.print(gx); //gyro X
+          dataFile.print(" ");
+          dataFile.print(gy); //gyro Y
+          dataFile.print(" ");
+          dataFile.print(gz); //gyro Z
+          dataFile.print(" ");
+          dataFile.print(last_gyro_millis); //time
+        }
+
+        //done
+        dataFile.println();
+        dataFile.close();
+      } else {
+        Serial.println(F("E2")); // E2 = Can't open the file
+        digitalWrite(LED, HIGH);
+      }
+      
+      last_datalog_write_millis = millis();
     }
 }
